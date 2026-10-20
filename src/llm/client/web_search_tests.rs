@@ -6,6 +6,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use clap::Parser;
 use serde_json::{Value, json};
 use wiremock::{
     Mock, MockServer, Request, Respond, ResponseTemplate,
@@ -340,6 +341,52 @@ async fn web_search_permissions_and_saved_settings() {
         "No web tools available"
     );
     assert!(mcp.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn web_search_cli_preserves_saved_permissions_and_endpoint() {
+    let (mut config, mcp, _model) = setup("normal").await;
+    let dir = std::env::temp_dir().join(format!("deepwiki-cli-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("litho.toml");
+    for (saved_disabled, web_disabled, flag) in [
+        (true, false, false),
+        (false, false, true),
+        (false, true, false),
+        (false, false, false),
+    ] {
+        config.llm.disable_preset_tools = saved_disabled;
+        config.llm.disable_web_search = web_disabled;
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        let mut args = vec![
+            "deepwiki-rs".to_owned(),
+            "--config".into(),
+            path.to_str().unwrap().to_owned(),
+        ];
+        if flag {
+            args.push("--disable-preset-tools".into());
+        }
+        let loaded = crate::cli::Args::parse_from(args).to_config();
+        assert_eq!(loaded.llm.disable_preset_tools, saved_disabled || flag);
+        assert_eq!(loaded.llm.disable_web_search, web_disabled);
+        assert_eq!(loaded.llm.web_search_mcp_url, config.llm.web_search_mcp_url);
+        assert_eq!(loaded.llm.api_key, config.llm.api_key);
+        assert_eq!(loaded.llm.api_base_url, config.llm.api_base_url);
+        assert_eq!(loaded.llm.model_efficient, config.llm.model_efficient);
+        let answer = LLMClient::new(loaded)
+            .unwrap()
+            .prompt("Use public documentation", "run-cli")
+            .await
+            .unwrap();
+        if saved_disabled || web_disabled || flag {
+            assert_eq!(answer, "No web tools available");
+            assert!(mcp.received_requests().await.unwrap().is_empty());
+        } else {
+            assert!(answer.contains(SOURCE));
+            assert_eq!(calls(&mcp).await.len(), 3);
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
